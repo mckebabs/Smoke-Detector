@@ -2,11 +2,12 @@
 
 The codes is used for the internet enabled smoke detector with additional functionality of motion detection/logging
 Hardware used:
--Smoke Detector: xxx
--Controller: NodeMCU ESP8266
--Custom circuit board for filtering the buzzer signal and triggering the alarm button via pnp transistor
--Motion sensor: HC-S501
--5v->9v booster 
+
+1) Smoke Detector: xxx
+2) Controller: NodeMCU ESP8266
+3) Custom circuit board for filtering the buzzer signal and triggering the alarm button via pnp transistor
+4) Motion sensor: HC-S501
+5) 5v->9v booster 
 
 Features:
 
