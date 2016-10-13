@@ -15,9 +15,17 @@ unsigned long rolloverTime = 0;
 unsigned long previousMillis = 0;
 unsigned long timerSMS = 0;
 
+//----Functions
+void blinker();
+void pirCounter();
+void listenForAlarm();
+void testAlarm();
+void stopAlarm();
+void isHome();
+
 //------Wifi-----
-char ssid[] = "xxxxxxx";  //  your network SSID (name)
-char pass[] = "xxxxxxx";       // your network password
+char ssid[] = "xxxxxxxxx";  //  your network SSID (name)
+char pass[] = "xxxxxxxxxxxx";       // your network password
 WiFiClient client;
 long rssi = WiFi.RSSI();
 
@@ -37,12 +45,12 @@ String message;
 
 //-----ThingSpeak-----
 // replace with your channel’s thingspeak API key
-String writeApiKey = "xxxxxxx";
-String readApiKey = "xxxxxxx";
+String writeApiKey = "xxxxxxxxxxxxxxx";
+String readApiKey = "xxxxxxxxxxxxxxx";
 const char* server = "api.thingspeak.com";
 
 //-------Blynk-----
-char auth[] = "xxxxxxx";
+char auth[] = "xxxxxxxxxxxxxxxxxxxxxxxxx";
 String txt;
 WidgetRTC rtc;
 BLYNK_ATTACH_WIDGET(rtc, V5);
@@ -57,10 +65,6 @@ String alarmMessage;
 
 //------IFTTT
 const uint16_t port = 80;
-const char * host = "maker.ifttt.com";
-const int httpPort = 80;
-String url = "/trigger/XXXX/with/key/YYYY"; //Where XXXX=event_name, YYYY=user's key
-
 
 //-------END---------
 
@@ -72,12 +76,14 @@ void blinker() {  //Blink a led
   digitalWrite(greanLedPin2, LOW);
 }
 
-void requestIFTTT() {  //Send SMS/Email notification in case alarm goes off via IFTTT service
-
+void requestIFTTT() {  //Send SMS notification in case alarm goes off via IFTTT service
+  const char * host = "maker.ifttt.com";
+  const int httpPort = 80;
   if (!client.connect(host, httpPort)) {
     Serial.println("connection failed");
     return;
   }
+  String url = "/trigger/xxxxxxxxxx/with/key/yyyyyyyyyyyyyyyy"; //Where XXXX=event_name, YYYY=user's key
   Serial.print("Requesting URL: ");
   Serial.println(url);
   // This will send the request to the server
@@ -150,10 +156,11 @@ void isHome() { //is anybody home. It will be executed every 30 seconds. If some
   if (isHomeCount > 0) {
     message = "Somebody is at Home";
   } else {
-    if (millis() - varTime > 600000){
+    if (millis() - varTime > 600000) {
       message = "Nobody is at Home";
-    varTime = millis();
-  }}
+      varTime = millis();
+    }
+  }
 }
 
 void timeRollover() { //unsigned long value can hold millisecond count for ~50 days so some time before the rollover values are reset.
@@ -199,7 +206,7 @@ void postToThingspeak() {
   postLine += "&field3=";
   postLine += String(soundAlarmCount);
   postLine += "&field4=";
-  postLine += String(millis()/8640000); //Days online. Will be restet about every 50 days
+  postLine += String(millis() / 8640000); //Days online. Will be restet about every 50 days
   thingspeak(postLine);
   blinker();
   pirCount = 0; //After each post to Thingspeak, counter is reset
