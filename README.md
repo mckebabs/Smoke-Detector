@@ -29,4 +29,4 @@ Features:
 
 9) Fake "multi threading" orchestrating all processes
 
-Video of how the device is functioning in real life can be seen here: https://xxx
+Video of how the device is functioning in real life can be seen here: https://www.youtube.com/watch?v=8DJ84n9dWVM
