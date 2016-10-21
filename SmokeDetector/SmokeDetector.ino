@@ -24,8 +24,8 @@ void stopAlarm();
 void isHome();
 
 //------Wifi-----
-char ssid[] = "xxxxxxxxx";  //  your network SSID (name)
-char pass[] = "xxxxxxxxxxxx";       // your network password
+char ssid[] = "xxxxxxxxxxxxx";  //  your network SSID (name)
+char pass[] = "xxxxxxxxxxxxxxxx";       // your network password
 WiFiClient client;
 long rssi = WiFi.RSSI();
 
@@ -40,17 +40,18 @@ int pirPin = 12; // Input for HC-S501
 int pirValue; // Place to store read PIR Value
 int pirCount = 0;
 int isHomeCount = 0;
+int homeFlag = 0;
 String message;
 
 
 //-----ThingSpeak-----
 // replace with your channel’s thingspeak API key
-String writeApiKey = "xxxxxxxxxxxxxxx";
-String readApiKey = "xxxxxxxxxxxxxxx";
+String writeApiKey = "xxxxxxxxxxxxxxxxx";
+String readApiKey = "xxxxxxxxxxxxxxxxxxx";
 const char* server = "api.thingspeak.com";
 
 //-------Blynk-----
-char auth[] = "xxxxxxxxxxxxxxxxxxxxxxxxx";
+char auth[] = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
 String txt;
 WidgetRTC rtc;
 BLYNK_ATTACH_WIDGET(rtc, V5);
@@ -83,7 +84,7 @@ void requestIFTTT() {  //Send SMS notification in case alarm goes off via IFTTT 
     Serial.println("connection failed");
     return;
   }
-  String url = "/trigger/xxxxxxxxxx/with/key/yyyyyyyyyyyyyyyy"; //Where XXXX=event_name, YYYY=user's key
+  String url = "/trigger/xxxxxxxxxxxxxxxx/with/key/yyyyyyyyyyyyyyy"; //Where XXXX=event_name, YYYY=user's key
   Serial.print("Requesting URL: ");
   Serial.println(url);
   // This will send the request to the server
@@ -162,6 +163,16 @@ void isHome() { //is anybody home. It will be executed every 30 seconds. If some
     }
   }
 }
+
+void isHomeNotif() {                //Send a push notification one time if there is an activity between 10oclock and 24 oclock.
+  if (hour() >= 10 && isHomeCount > 0 && homeFlag == 0) {
+    homeFlag = 1;
+    Blynk.notify("Kika majas!"); //Notification message for the Blynk app
+  } else if (hour() == 9 && minute() == 59 && homeFlag == 1) { //Reset the flag to "0" at 9:59, making 1 minute window in case there are "hickup" with the ESP8266
+    homeFlag = 0;
+  }
+}
+
 
 void timeRollover() { //unsigned long value can hold millisecond count for ~50 days so some time before the rollover values are reset.
   if (millis() > 4000000000) {
@@ -311,6 +322,7 @@ void loop() {
   }
 
   if (millis() - isHomeTime > 30000) {
+    isHomeNotif(); //For push notification
     isHome();
     isHomeTime = millis();
     isHomeCount = 0;
