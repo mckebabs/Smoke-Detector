@@ -1,346 +1,365 @@
-//-----Libs-----
-#define BLYNK_PRINT Serial    // Comment this out to disable prints and save space
-#include <BlynkSimpleEsp8266.h>
-#include <ESP8266WiFi.h>
-#include <TimeLib.h>
-#include <WidgetRTC.h>
+// Modern Blynk + local OTA. See README.md before installing on the detector.
+#if __has_include("Secrets.h")
+#include "Secrets.h"
+#else
+#error "Copy Secrets.example.h to Secrets.h and configure Wi-Fi, Blynk and OTA."
+#endif
 
-//---Timer last update----
-unsigned long timeAlarm = 0;
-unsigned long timePIR = 0;
-unsigned long isHomeTime = 0;
-unsigned long postToThingspeak_time = 0;
-unsigned long varTime = 0;
-unsigned long rolloverTime = 0;
-unsigned long previousMillis = 0;
-unsigned long timerSMS = 0;
+#define BLYNK_TIMEOUT_MS 300
+#define BLYNK_HEARTBEAT 60
+#define BLYNK_NO_DEFAULT_BANNER
+#include "CloudTransport.h"
+#include <ArduinoOTA.h>
+#include <Schedule.h>
+#include <time.h>
+#include "Detector.h"
 
-//----Functions
-void blinker();
-void pirCounter();
-void listenForAlarm();
-void testAlarm();
-void stopAlarm();
-void isHome();
+static_assert(sizeof(SMOKE_OTA_PASSWORD) >= 13, "Use an OTA password of at least 12 characters");
+static_assert(sizeof(BLYNK_AUTH_TOKEN) > 1, "Blynk token must not be empty");
 
-//------Wifi-----
-char ssid[] = "xxxxxxxxxxxxx";  //  your network SSID (name)
-char pass[] = "xxxxxxxxxxxxxxxx";       // your network password
-WiFiClient client;
-long rssi = WiFi.RSSI();
+smoke::Detector detector;
+BoundedTlsClient cloudSocket;
+CloudTransport cloudTransport(cloudSocket);
+CloudClient Blynk(cloudTransport);
+#include <BlynkWidgets.h>
+BearSSL::X509List cloudTrust(kCloudRootCa);
+smoke::Backoff wifiRetry, cloudRetry;
 
-//----LEDs----
-int blueLedPin = 2;  // Blue Led
-int greanLedPin1 = 15; // Green Led D8
-int greanLedPin2 = 13; // Green Led D7
-boolean ledState;
+bool otaListening = false, otaUpdating = false, otaPermitted = false;
+bool recurrentSensors = false, inputsBusy = false, rawPir = false, otaHandling = false;
+uint16_t lastAdc = 0, adcMin = 1023, adcMax = 0;
+uint32_t alarmSampleAt = 0, motionSampleAt = 0, activityAt = 0;
+bool activityPulse = false;
+uint32_t diagnosticAt = 0, writesSent = 0, eventsSent = 0;
+uint32_t maximumSampleGap = 0, testSequenceSeen = 0;
+bool cloudWasConnected = false;
+uint64_t outageAt = 0, lastOutageSeconds = 0;
+uint32_t pending = 0, publishAt = 0;
+int lastAlarm = -1, lastTest = -1, lastSilence = -1;
+uint32_t lastTestEpoch = UINT32_MAX;
+smoke::EventLimiter eventLimiter;
+char restartReason[128]{};
 
-//---PIR-----
-int pirPin = 12; // Input for HC-S501
-int pirValue; // Place to store read PIR Value
-int pirCount = 0;
-int isHomeCount = 0;
-int homeFlag = 0;
-String message;
+enum PublishBit : uint8_t {
+  AlarmBit, TestBit, TestEpochBit, SilenceBit, RssiBit, UptimeBit, HeapBit,
+  MotionTimeBit, VersionBit, ResetBit, MotionBucketBit, SummaryBit
+};
+constexpr uint32_t kHealthMask = (1UL << RssiBit) | (1UL << UptimeBit) |
+    (1UL << HeapBit) | (1UL << MotionTimeBit);
+constexpr uint32_t kSnapshotMask = (1UL << (ResetBit + 1)) - 1;
 
-
-//-----ThingSpeak-----
-// replace with your channel’s thingspeak API key
-String writeApiKey = "xxxxxxxxxxxxxxxxx";
-String readApiKey = "xxxxxxxxxxxxxxxxxxx";
-const char* server = "api.thingspeak.com";
-
-//-------Blynk-----
-char auth[] = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
-String txt;
-WidgetRTC rtc;
-BLYNK_ATTACH_WIDGET(rtc, V5);
-String currentTime;
-
-//-------SmokeDetectorButton-----
-int sdButton = 5;
-int soundAlarmCount = 0; //Counts the number of time Analog signal is received before stopping the alarm
-int alarmValue; //Analog value
-String alarmMessage;
-
-
-//------IFTTT
-const uint16_t port = 80;
-
-//-------END---------
-
-//------FUNCTIONS--------
-
-void blinker() {  //Blink a led
-  digitalWrite(greanLedPin2, HIGH);
-  delay(50);
-  digitalWrite(greanLedPin2, LOW);
+uint32_t utcNow() {
+  const time_t value = time(nullptr);
+  return value >= 1704067200 ? static_cast<uint32_t>(value) : 0;
 }
 
-void requestIFTTT() {  //Send SMS notification in case alarm goes off via IFTTT service
-  const char * host = "maker.ifttt.com";
-  const int httpPort = 80;
-  if (!client.connect(host, httpPort)) {
-    Serial.println("connection failed");
+void updateOutputs(uint32_t now) {
+  digitalWrite(smoke::kButtonPin, detector.buttonPressed() ? LOW : HIGH);
+  digitalWrite(smoke::kBlueLedPin, detector.alarmActive() ? LOW : HIGH);
+  digitalWrite(smoke::kMotionLedPin, (rawPir || detector.alarmActive()) ? HIGH : LOW);
+  const bool pulse = activityPulse && !smoke::elapsed(now, activityAt, 50);
+  const bool offlineBlink = !detector.connected() && now % 2000 < 50;
+  digitalWrite(smoke::kActivityLedPin, (detector.alarmActive() || pulse || offlineBlink) ? HIGH : LOW);
+}
+
+// Runs in CONT context, including during network yields. No networking or logs.
+void serviceInputs() {
+  if (inputsBusy || otaUpdating || otaHandling) return;
+  inputsBusy = true;
+  const uint32_t now = millis();
+  detector.tick(now);
+  if (smoke::elapsed(now, alarmSampleAt, smoke::kAlarmSampleMs)) {
+    const uint32_t gap = uint32_t(now - alarmSampleAt);
+    if (gap > maximumSampleGap) maximumSampleGap = gap;
+    alarmSampleAt = now;
+    lastAdc = analogRead(A0);
+    if (lastAdc < adcMin) adcMin = lastAdc;
+    if (lastAdc > adcMax) adcMax = lastAdc;
+    detector.sampleAlarm(lastAdc, now);
+  }
+  if (smoke::elapsed(now, motionSampleAt, 20)) {
+    motionSampleAt = now;
+    rawPir = digitalRead(smoke::kPirPin) == HIGH;
+    detector.sampleMotion(rawPir, now, utcNow());
+  }
+  if (detector.testSuccessSequence() != testSequenceSeen) {
+    testSequenceSeen = detector.testSuccessSequence();
+    detector.recordTestEpoch(utcNow());
+  }
+  updateOutputs(now);
+  inputsBusy = false;
+}
+
+void observeConnection(bool connected) {
+  if (connected == cloudWasConnected) return;
+  detector.setConnected(connected, millis());
+  cloudWasConnected = connected;
+  if (connected) {
+    lastOutageSeconds = (detector.uptimeMs() - outageAt) / 1000;
+    pending = kSnapshotMask;
+    // Retain the last successful timestamp in Blynk across firmware restarts.
+    if (!detector.lastTestEpoch()) pending &= ~(1UL << TestEpochBit);
+    if (lastOutageSeconds || detector.offlineMotion() || detector.events.dropped()) pending |= 1UL << SummaryBit;
+    cloudRetry.reset();
+    Serial.println(F("Blynk connected; publishing state, never syncing commands."));
+  } else {
+    outageAt = detector.uptimeMs();
+    pending = 0;
+    Blynk.disconnect();
+    Serial.println(F("Blynk disconnected; sensors and local OTA remain independent."));
+  }
+}
+
+BLYNK_CONNECTED() { observeConnection(true); }
+BLYNK_DISCONNECTED() { observeConnection(false); }
+
+BLYNK_WRITE(V0) {
+  serviceInputs();
+  if (param.asInt() == 1) {
+    const bool accepted = detector.requestTest(millis());
+    Serial.println(accepted ? F("Test accepted.") : F("Test rejected: busy or alarming."));
+    updateOutputs(millis());
+  }
+}
+BLYNK_WRITE(V11) {
+  serviceInputs();
+  if (param.asInt() == 1) {
+    const bool accepted = detector.prepareSilence(millis());
+    Serial.println(accepted ? F("Silence confirmation opened.") : F("Silence preparation rejected."));
+  }
+}
+BLYNK_WRITE(V12) {
+  serviceInputs();
+  if (param.asInt() == 1) {
+    const bool accepted = detector.confirmSilence(millis());
+    Serial.println(accepted ? F("Silence requested.") : F("Silence confirmation rejected."));
+    updateOutputs(millis());
+  }
+}
+
+void configureOta() {
+  ArduinoOTA.setHostname(smoke::kHostname);
+  ArduinoOTA.setPassword(SMOKE_OTA_PASSWORD);
+  ArduinoOTA.onStart([]() {
+    otaUpdating = detector.beginOta(millis());
+    digitalWrite(smoke::kButtonPin, HIGH);
+    Serial.println(F("OTA started; button released, ESP monitoring paused."));
+  });
+  ArduinoOTA.onEnd([]() { Serial.println(F("OTA complete; rebooting.")); });
+  ArduinoOTA.onError([](ota_error_t error) {
+    otaUpdating = false;
+    detector.endOta();
+    digitalWrite(smoke::kButtonPin, HIGH);
+    Serial.printf("OTA failed (code %u); monitoring resumed.\n", unsigned(error));
+  });
+  const uint32_t actual = ESP.getFlashChipRealSize(), configured = ESP.getFlashChipSize();
+  otaPermitted = actual == configured && ESP.getFreeSketchSpace() >= ESP.getSketchSize();
+  Serial.printf("Flash actual/configured: %lu/%lu; sketch/free OTA: %lu/%lu; OTA %s\n",
+      static_cast<unsigned long>(actual), static_cast<unsigned long>(configured),
+      static_cast<unsigned long>(ESP.getSketchSize()), static_cast<unsigned long>(ESP.getFreeSketchSpace()),
+      otaPermitted ? "eligible" : "DISABLED");
+}
+
+void serviceOta() {
+  // Remove the listener during alarms/tests, discarding pending uploads too.
+  // onStart alone is too late: ArduinoOTA 3.1.2 calls it after Update.begin().
+  const bool allowed = otaPermitted && WiFi.status() == WL_CONNECTED && detector.canOta();
+  if (!allowed && otaListening) {
+    ArduinoOTA.end(); otaListening = false;
+  } else if (allowed && !otaListening) {
+    ArduinoOTA.begin(); otaListening = true;
+  }
+  if (allowed && otaListening) {
+    // Freeze admission conditions across handle(): even its setup/MDNS yields
+    // must not change the model between eligibility and the start callback.
+    otaHandling = true;
+    ArduinoOTA.handle();
+    otaHandling = false;
+  }
+}
+
+void serviceNetwork() {
+  const uint32_t now = millis();
+  if (WiFi.status() != WL_CONNECTED) {
+    if (cloudWasConnected) observeConnection(false);
+    if (wifiRetry.ready(now)) {
+      wifiRetry.attempted(now);
+      WiFi.begin(SMOKE_WIFI_SSID, SMOKE_WIFI_PASSWORD);
+    }
     return;
   }
-  String url = "/trigger/xxxxxxxxxxxxxxxx/with/key/yyyyyyyyyyyyyyy"; //Where XXXX=event_name, YYYY=user's key
-  Serial.print("Requesting URL: ");
-  Serial.println(url);
-  // This will send the request to the server
-  client.print(String("GET ") + url + " HTTP/1.1\r\n" +
-               "Host: " + host + "\r\n" +
-               "Connection: close\r\n\r\n");
-  unsigned long timeout = millis();
-  while (client.available() == 0) {
-    if (millis() - timeout > 5000) {
-      Serial.println(">>> Client Timeout !");
-      client.stop();
-      return;
-    }
-  }
-  // Read all the lines of the reply from server and print them to Serial
-  while (client.available()) {
-    String line = client.readStringUntil('\r');
-    Serial.print(line);
-  }
-  Serial.println();
-  Serial.println("closing connection");
-}
-
-void pirCounter() {  //Movement counter
-  pirValue = digitalRead(pirPin);
-  digitalWrite(greanLedPin1, pirValue);
-  if (pirValue) {
-    pirCount++;
-    isHomeCount++;
-    Serial.println("Motion Detected");
-  }
-}
-void testAlarm() {  //Alarm test function
-  digitalWrite(sdButton, LOW);
-  Serial.println("Button pressed!!!!!!!!!!");
-  delay(2000);
-  digitalWrite(sdButton, HIGH);
-  Serial.println("Test Alarm");
-}
-
-void listenForAlarm() {  //Listens for the smoke detector's buzzer to go off
-  alarmValue = analogRead(A0);
-  if ( alarmValue > 500) {
-    soundAlarmCount++;
-    Serial.println("ALARM!!!");
-    digitalWrite(blueLedPin, LOW);
-    digitalWrite(greanLedPin1, HIGH);
-    digitalWrite(greanLedPin2, HIGH);
-    Blynk.notify("!!!ALARM!!!");
-    if (millis() - timerSMS > 60000) { //Send SMS if for the last 1 minute it hasn't been already sent
-      requestIFTTT();
-      timerSMS = millis();
-      Serial.println("SMS Notification Sent");
-    }
+  wifiRetry.reset();
+  if (Blynk.connected()) {
+    Blynk.run();
+    if (!Blynk.connected()) observeConnection(false);
   } else {
-    digitalWrite(blueLedPin, HIGH);
-  }
-}
-
-void stopAlarm() {  //Function for stopping the alarm
-  digitalWrite(sdButton, LOW);
-  delay(1000);
-  digitalWrite(sdButton, HIGH);
-  soundAlarmCount = 0;
-  //When alarm is stopped, counter is reset
-  Serial.println("Stop Alarm");
-}
-
-void isHome() { //is anybody home. It will be executed every 30 seconds. If somebody is at home, message is positive, if somebody was home but isn't anymore, positive value will still be saved for 10 minutes(600000ms) after the last positive event.
-  if (isHomeCount > 0) {
-    message = "Somebody is at Home";
-  } else {
-    if (millis() - varTime > 600000) {
-      message = "Nobody is at Home";
-      varTime = millis();
+    if (cloudWasConnected) observeConnection(false);
+    // TLS needs a clock. SNTP runs in the background without a wait loop.
+    if (utcNow() && recurrentSensors && !detector.buttonPressed() &&
+        !detector.testRunning() && cloudRetry.ready(now)) {
+      const bool connected = Blynk.connect(1000);
+      if (connected) observeConnection(true);
+      else { Blynk.disconnect(); cloudRetry.attempted(millis()); }
     }
   }
 }
 
-void isHomeNotif() {                //Send a push notification one time if there is an activity between 10oclock and 24 oclock.
-  if (hour() >= 10 && isHomeCount > 0 && homeFlag == 0) {
-    homeFlag = 1;
-    Blynk.notify("Kika majas!"); //Notification message for the Blynk app
-  } else if (hour() == 9 && minute() == 59 && homeFlag == 1) { //Reset the flag to "0" at 9:59, making 1 minute window in case there are "hickup" with the ESP8266
-    homeFlag = 0;
+void markPublications() {
+  if (!Blynk.connected()) return;
+  if (lastAlarm != int(detector.alarmActive())) pending |= 1UL << AlarmBit;
+  if (lastTest != int(detector.testState())) pending |= 1UL << TestBit;
+  if (detector.lastTestEpoch() && lastTestEpoch != detector.lastTestEpoch()) pending |= 1UL << TestEpochBit;
+  if (lastSilence != int(detector.silenceState())) pending |= 1UL << SilenceBit;
+  if (detector.healthReady()) { pending |= kHealthMask; detector.acknowledgeHealth(); }
+  if (detector.motionReady()) pending |= 1UL << MotionBucketBit;
+  else pending &= ~(1UL << MotionBucketBit);
+  if (detector.events.dropped() || detector.offlineMotion()) pending |= 1UL << SummaryBit;
+}
+
+void pulseActivity() { activityPulse = true; activityAt = millis(); }
+
+void publishOne(uint8_t bit) {
+  // Capture state before virtualWrite: network yields may change the model.
+  switch (bit) {
+    case AlarmBit: {
+      const int value = detector.alarmActive();
+      Blynk.virtualWrite(V1, value); lastAlarm = value; break;
+    }
+    case TestBit: {
+      const auto state = detector.testState();
+      Blynk.virtualWrite(V7, detector.testText()); lastTest = int(state); break;
+    }
+    case TestEpochBit: {
+      const uint32_t value = detector.lastTestEpoch();
+      Blynk.virtualWrite(V8, value); lastTestEpoch = value; break;
+    }
+    case SilenceBit: {
+      const auto state = detector.silenceState();
+      Blynk.virtualWrite(V13, detector.silenceText()); lastSilence = int(state); break;
+    }
+    case RssiBit: Blynk.virtualWrite(V3, WiFi.RSSI()); break;
+    case UptimeBit: {
+      char value[24];
+      snprintf(value, sizeof(value), "%llu", static_cast<unsigned long long>(detector.uptimeMs() / 1000));
+      Blynk.virtualWrite(V4, value); break;
+    }
+    case HeapBit: Blynk.virtualWrite(V5, ESP.getFreeHeap()); break;
+    case MotionTimeBit: Blynk.virtualWrite(V6, detector.lastMotionEpoch()); break;
+    case VersionBit: Blynk.virtualWrite(V9, smoke::kFirmwareVersion); break;
+    case ResetBit: Blynk.virtualWrite(V10, restartReason); break;
+    case MotionBucketBit: {
+      const uint32_t value = detector.motionTotal();
+      Blynk.virtualWrite(V2, value);
+      if (Blynk.connected()) detector.acknowledgeMotion();
+      break;
+    }
+    case SummaryBit: {
+      const uint32_t motion = detector.offlineMotion(), dropped = detector.events.dropped();
+      char text[192];
+      snprintf(text, sizeof(text), "Last outage: %llu s; offline motion: %lu; dropped event records: %lu. RAM since restart.",
+          static_cast<unsigned long long>(lastOutageSeconds),
+          static_cast<unsigned long>(motion), static_cast<unsigned long>(dropped));
+      Blynk.virtualWrite(V14, text);
+      if (Blynk.connected()) {
+        detector.acknowledgeOfflineMotion(motion);
+        detector.events.acknowledgeDropped(dropped);
+      }
+      break;
+    }
+  }
+  ++writesSent;
+  pulseActivity();
+}
+
+bool eventAllowed() {
+  return eventLimiter.ready(detector.uptimeMs());
+}
+
+void publishEvent() {
+  const smoke::Event* next = detector.events.front();
+  if (!next || !eventAllowed()) return;
+  const smoke::Event event = *next;
+  const char* code = event.kind == smoke::EventKind::AlarmStart ? "smoke_alarm" :
+      event.kind == smoke::EventKind::AlarmClear ? "smoke_clear" : "test_failed";
+  const char* label = event.kind == smoke::EventKind::AlarmStart ? "Buzzer alarm detected" :
+      event.kind == smoke::EventKind::AlarmClear ? "Buzzer alarm cleared" : "No test buzzer response";
+  char description[192];
+  snprintf(description, sizeof(description), "%s; occurred %llu seconds ago%s; alarm now %s.",
+      label, static_cast<unsigned long long>((detector.uptimeMs() - event.atMs) / 1000),
+      event.occurredOffline ? " while offline" : "", detector.alarmActive() ? "ACTIVE" : "clear");
+  // Pop before network yields so queue eviction cannot remove a different event.
+  // logEvent() has no application-level acknowledgement; delivery is best effort.
+  detector.events.pop();
+  Blynk.logEvent(code, description);
+  eventLimiter.record(detector.uptimeMs());
+  if (!Blynk.connected() || !cloudSocket.connected()) {
+    detector.events.push(event, true);
+    observeConnection(false);
+  }
+  ++eventsSent;
+  pulseActivity();
+}
+
+void serviceTelemetry() {
+  markPublications();
+  if (!Blynk.connected() || !smoke::elapsed(millis(), publishAt, 250)) return;
+  publishAt = millis();
+  if (pending & (1UL << AlarmBit)) {
+    pending &= ~(1UL << AlarmBit); publishOne(AlarmBit);
+  } else if (detector.events.front() && eventAllowed()) {
+    publishEvent();
+  } else {
+    for (uint8_t bit = 1; bit <= SummaryBit; ++bit) {
+      if (pending & (1UL << bit)) {
+        pending &= ~(1UL << bit); publishOne(bit); break;
+      }
+    }
   }
 }
-
-
-void timeRollover() { //unsigned long value can hold millisecond count for ~50 days so some time before the rollover values are reset.
-  if (millis() > 4000000000) {
-    timeAlarm = 0;
-    timePIR = 0;
-    isHomeTime = 0;
-    postToThingspeak_time = 0;
-    varTime = 0;
-    rolloverTime = 0;
-  }
-}
-
-// field variable should be something like this
-// field =     postStr +="&field1=";    postStr += String(variable);
-// where "field1" is the name of the field in thingspeak and variable is the value of the field
-// The "field" value can consist of multiple field[x] definitions
-
-void thingspeak(String field) {
-  if (client.connect(server, 80)) { // "184.106.153.149" or api.thingspeak.com
-    String postStr = writeApiKey;
-    postStr += field;
-    postStr += "\r\n\r\n";
-    client.print("POST /update HTTP/1.1\n");
-    client.print("Host: api.thingspeak.com\n");
-    client.print("Connection: close\n");
-    client.print("X-THINGSPEAKAPIKEY: " + writeApiKey + "\n");
-    client.print("Content-Type: application/x-www-form-urlencoded\n");
-    client.print("Content-Length: ");
-    client.print(postStr.length());
-    client.print("\n\n");
-    client.print(postStr);
-    Serial.println("Sent to Thingspeak");
-  }
-  client.stop();
-}
-
-void postToThingspeak() {
-  String postLine = "&field1=";
-  postLine += String(WiFi.RSSI());
-  postLine += "&field2=";
-  postLine += String(pirCount / 3); //divided by 3 because the PIR will generate 3-6 counts for each detection
-  postLine += "&field3=";
-  postLine += String(soundAlarmCount);
-  postLine += "&field4=";
-  postLine += String(millis() / 8640000); //Days online. Will be restet about every 50 days
-  thingspeak(postLine);
-  blinker();
-  pirCount = 0; //After each post to Thingspeak, counter is reset
-}
-
-void printWifiStatus() {
-  // print the SSID of the network you're attached to:
-  Serial.print("SSID: ");
-  Serial.println(WiFi.SSID());
-  // print your WiFi shield's IP address:
-  IPAddress ip = WiFi.localIP();
-  Serial.print("IP Address: ");
-  Serial.println(ip);
-  // print the received signal strength:
-  Serial.print("signal strength (RSSI):");
-  Serial.print(rssi);
-  Serial.println(" dBm");
-}
-
-//----Blynk functions-----
-
-BLYNK_WRITE(V0)
-{
-  Serial.println("Message: Test Alarm"); //Button 1 to test the alarm
-  testAlarm();
-}
-BLYNK_WRITE(V1)
-{
-  Serial.println("Message: Stop Alarm"); //Button 2 to stop the alarm
-  stopAlarm();
-}
-
-BLYNK_READ(V2) { //Post info to Blynk
-
-  currentTime = "-    ";
-  currentTime += String(hour()) + ":" + minute() + ":" + second() + "    -";
-  txt = "Movement activity: ";
-  txt += String((pirCount / 3)); //divided by 3 because the PIR will generate 3-6 counts for each detection
-  Blynk.virtualWrite(V2, currentTime);   // Send time to the App
-  Blynk.virtualWrite(V3, txt); //Movement activity message
-  Blynk.virtualWrite(V4, message); // Message about activity in the last 10 minutes
-  blinker(); //Blink a led on post
-}
-
-
-//-------SETUP--------
 
 void setup() {
-
+  digitalWrite(smoke::kButtonPin, HIGH);
+  pinMode(smoke::kButtonPin, OUTPUT);
+  pinMode(smoke::kPirPin, INPUT);
+  pinMode(smoke::kBlueLedPin, OUTPUT);
+  pinMode(smoke::kMotionLedPin, OUTPUT);
+  pinMode(smoke::kActivityLedPin, OUTPUT);
   Serial.begin(115200);
-
-  //---------WIFI--------
-  // Connecting to a WiFi network
-  Serial.print("Connecting to ");
-  Serial.println(ssid);
+  const uint32_t now = millis();
+  detector.begin(now);
+  alarmSampleAt = now - smoke::kAlarmSampleMs;
+  motionSampleAt = now - 20;
+  serviceInputs();
+  recurrentSensors = schedule_recurrent_function_us([]() { serviceInputs(); return true; }, 20000);
+  if (!recurrentSensors) Serial.println(F("Sensor scheduling failed; cloud connections disabled."));
+  snprintf(restartReason, sizeof(restartReason), "%s", ESP.getResetReason().c_str());
+  configureOta();
+  cloudSocket.setTrustAnchors(&cloudTrust);
+  cloudSocket.setBufferSizes(16384, 512); // Do not require server MFLN support.
+  Blynk.config(BLYNK_AUTH_TOKEN);
+  Blynk.disconnect();
+  WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, pass);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("");
-  Serial.println("WiFi connected");
-  printWifiStatus();
-
-  //-----Blynk-----
-  Blynk.config(auth);
-
-  while (Blynk.connect() == false) {
-    // Wait until connected
-  }
-  // Begin synchronizing time
-  rtc.begin();
-
-  //-------LED-------
-  pinMode(blueLedPin, OUTPUT);
-  pinMode(greanLedPin1, OUTPUT);
-  pinMode(greanLedPin2, OUTPUT);
-
-  //-----PIR Sensor----
-  pinMode(pirPin, INPUT);
-  digitalWrite(blueLedPin, HIGH);
-
-  //-----SmokeDetector-----
-  pinMode(A0, INPUT);
-  pinMode(sdButton, OUTPUT);
-  digitalWrite(sdButton, HIGH);
+  WiFi.hostname(smoke::kHostname);
+  WiFi.setAutoReconnect(false);
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  Serial.printf("Smoke detector %s ready. OTA hostname: %s.\n", smoke::kFirmwareVersion, smoke::kHostname);
 }
 
 void loop() {
-  Blynk.run(); //Runs all Blynk activities
-
-  if (millis() - timeAlarm > 100) {
-    listenForAlarm();
-    timeAlarm = millis();
-    Serial.println("Listen for Alarm");
+  serviceInputs();
+  serviceOta();
+  serviceNetwork();
+  serviceInputs();
+  serviceOta();
+  serviceTelemetry();
+  if (smoke::elapsed(millis(), diagnosticAt, 60000)) {
+    diagnosticAt = millis();
+    Serial.printf("ADC last/min/max %u/%u/%u; max sample gap %lu ms; alarm %u; heap %lu; writes/events %lu/%lu\n",
+        unsigned(lastAdc), unsigned(adcMin), unsigned(adcMax),
+        static_cast<unsigned long>(maximumSampleGap), unsigned(detector.alarmActive()),
+        static_cast<unsigned long>(ESP.getFreeHeap()), static_cast<unsigned long>(writesSent),
+        static_cast<unsigned long>(eventsSent));
+    adcMin = 1023; adcMax = 0; maximumSampleGap = 0;
   }
-
-  if (millis() - timePIR > 500) {
-    pirCounter();
-    timePIR = millis();
-  }
-
-  if (millis() - isHomeTime > 30000) {
-    isHomeNotif(); //For push notification
-    isHome();
-    isHomeTime = millis();
-    isHomeCount = 0;
-    Serial.println(message);
-  }
-
-  if (millis() - postToThingspeak_time > 60000) {
-    postToThingspeak();
-    postToThingspeak_time = millis();
-    Serial.println("postToThingspeak");
-  }
-
-  if (millis() - rolloverTime > 85000000) {
-    timeRollover();
-    rolloverTime = millis();
-    Serial.println("Time counters dropped");
-  }
-
-  yield();
 }
-

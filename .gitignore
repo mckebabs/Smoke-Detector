@@ -1,0 +1,8 @@
+Secrets.h
+.tools/
+.build/
+.arduino/
+__pycache__/
+*.bin
+*.elf
+*.map

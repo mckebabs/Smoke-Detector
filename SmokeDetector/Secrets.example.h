@@ -1,0 +1,9 @@
+#pragma once
+
+// Copy to Secrets.h and replace the placeholders. Never commit Secrets.h.
+#define BLYNK_TEMPLATE_ID "TMPL_REPLACE_ME"
+#define BLYNK_TEMPLATE_NAME "Smoke Detector"
+#define BLYNK_AUTH_TOKEN "REPLACE_WITH_NEW_DEVICE_TOKEN"
+#define SMOKE_WIFI_SSID "REPLACE_WITH_WIFI_SSID"
+#define SMOKE_WIFI_PASSWORD "REPLACE_WITH_WIFI_PASSWORD"
+#define SMOKE_OTA_PASSWORD "REPLACE_WITH_UNIQUE_OTA_PASSWORD"
