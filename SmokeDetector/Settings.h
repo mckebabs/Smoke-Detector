@@ -7,7 +7,7 @@ constexpr uint8_t kPirPin = 12;
 constexpr uint8_t kBlueLedPin = 2;
 constexpr uint8_t kMotionLedPin = 15;
 constexpr uint8_t kActivityLedPin = 13;
-constexpr const char* kFirmwareVersion = "2.0.1";
+constexpr const char* kFirmwareVersion = "2.0.2";
 constexpr const char* kHostname = "smoke-detector";
 constexpr uint16_t kAlarmOn = 500;       // Active when ADC > this value.
 constexpr uint16_t kAlarmOff = 450;      // Clear only while ADC < this value.
@@ -29,5 +29,8 @@ constexpr uint16_t kEventDailyLimit = 90; // Leave room below Blynk's 100/day ca
 constexpr uint32_t kReconnectMinMs = 1000;
 constexpr uint32_t kReconnectMaxMs = 60000;
 constexpr uint32_t kNetworkTimeoutMs = 300;
+// Blynk's connect deadline includes DNS, TCP, TLS and login processing.
+// The core can spend up to 15 seconds in a TLS handshake.
+constexpr uint32_t kCloudConnectTimeoutMs = 20000;
 static_assert(kAlarmOff < kAlarmOn, "ADC hysteresis thresholds must be ordered");
 }  // namespace smoke

@@ -10,6 +10,7 @@
 #define BLYNK_TIMEOUT_MS 1000
 #define BLYNK_HEARTBEAT 60
 #define BLYNK_NO_DEFAULT_BANNER
+#define BLYNK_PRINT Serial
 #include "CloudTransport.h"
 #include <ArduinoOTA.h>
 #include <Schedule.h>
@@ -199,9 +200,18 @@ void serviceNetwork() {
     // TLS needs a clock. SNTP runs in the background without a wait loop.
     if (utcNow() && recurrentSensors && !detector.buttonPressed() &&
         !detector.testRunning() && cloudRetry.ready(now)) {
-      const bool connected = Blynk.connect(1000);
+      const uint32_t started = millis();
+      const bool connected = Blynk.connect(smoke::kCloudConnectTimeoutMs);
       if (connected) observeConnection(true);
-      else { Blynk.disconnect(); cloudRetry.attempted(millis()); }
+      else {
+        const int tlsError = cloudSocket.getLastSSLError();
+        const bool invalidToken = Blynk.isTokenInvalid();
+        Blynk.disconnect();
+        cloudRetry.attempted(millis());
+        Serial.printf("Blynk attempt failed after %lu ms; TLS error %d; invalid token %u. Retrying with backoff.\n",
+            static_cast<unsigned long>(uint32_t(millis() - started)),
+            tlsError, unsigned(invalidToken));
+      }
     }
   }
 }
@@ -357,11 +367,12 @@ void loop() {
   serviceTelemetry();
   if (smoke::elapsed(millis(), diagnosticAt, 60000)) {
     diagnosticAt = millis();
-    Serial.printf("ADC last/min/max %u/%u/%u; max sample gap %lu ms; alarm %u; heap %lu; writes/events %lu/%lu\n",
+    Serial.printf("ADC last/min/max %u/%u/%u; max sample gap %lu ms; alarm %u; heap %lu; writes/events %lu/%lu; WiFi %u; clock %u; Blynk %u\n",
         unsigned(lastAdc), unsigned(adcMin), unsigned(adcMax),
         static_cast<unsigned long>(maximumSampleGap), unsigned(detector.alarmActive()),
         static_cast<unsigned long>(ESP.getFreeHeap()), static_cast<unsigned long>(writesSent),
-        static_cast<unsigned long>(eventsSent));
+        static_cast<unsigned long>(eventsSent), unsigned(WiFi.status()),
+        unsigned(utcNow() != 0), unsigned(Blynk.connected()));
     adcMin = 1023; adcMax = 0; maximumSampleGap = 0;
   }
 }

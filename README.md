@@ -38,7 +38,11 @@ Sensor and button processing also runs in a recurrent ESP8266 CONT-stack callbac
 during network yields. DNS and TCP use a 300 ms timeout; the core's TLS handshake
 can take up to 15 seconds. Blynk's protocol timeout is separately set to 1 second,
 the minimum supported by Blynk 1.3.5. Failed cloud attempts back off from 1 to 60 seconds
-after completion. SNTP runs in the background; Blynk TLS waits for a valid clock
+after completion. The overall connection deadline is 20 seconds so a TLS
+handshake does not consume the entire budget before Blynk processes its login
+reply. Each network operation retains its own core/transport timeout; the outer
+deadline is checked between Blynk runs and cannot interrupt an operation.
+SNTP runs in the background; Blynk TLS waits for a valid clock
 without blocking startup. Missing internet/NTP/Blynk does not prevent local sensing
 or home-network OTA. This is cooperative scheduling, not hard real-time control;
 serial diagnostics report the maximum actual sample gap each minute.
@@ -164,7 +168,7 @@ the reason is recorded on serial, while current alarm/control status stays visib
 
 Pinned dependencies: **Arduino CLI 1.3.1**, **ESP8266 core 3.1.2**, **Blynk 1.3.5**.
 TLS uses Blynk's current `certs/certs_pem.h` CA bundle with hostname and certificate
-validity verification retained. Firmware version: **2.0.1**.
+validity verification retained. Firmware version: **2.0.2**.
 `sketch.yaml` selects NodeMCU 1.0 (`nodemcuv2`) with 4 MB flash / 1 MB filesystem.
 This is a build default, not a claim that the actual installed board has 4 MB.
 No filesystem is used by this firmware.
