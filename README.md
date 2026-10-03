@@ -36,7 +36,8 @@ The firmware senses a buzzer signal, not smoke concentration.
 
 Sensor and button processing also runs in a recurrent ESP8266 CONT-stack callback
 during network yields. DNS and TCP use a 300 ms timeout; the core's TLS handshake
-can take up to 15 seconds. Failed cloud attempts back off from 1 to 60 seconds
+can take up to 15 seconds. Blynk's protocol timeout is separately set to 1 second,
+the minimum supported by Blynk 1.3.5. Failed cloud attempts back off from 1 to 60 seconds
 after completion. SNTP runs in the background; Blynk TLS waits for a valid clock
 without blocking startup. Missing internet/NTP/Blynk does not prevent local sensing
 or home-network OTA. This is cooperative scheduling, not hard real-time control;
@@ -161,7 +162,9 @@ the reason is recorded on serial, while current alarm/control status stays visib
 
 ## Build and first installation
 
-Pinned dependencies: **Arduino CLI 1.3.1**, **ESP8266 core 3.1.2**, **Blynk 1.3.2**.
+Pinned dependencies: **Arduino CLI 1.3.1**, **ESP8266 core 3.1.2**, **Blynk 1.3.5**.
+TLS uses Blynk's current `certs/certs_pem.h` CA bundle with hostname and certificate
+validity verification retained. Firmware version: **2.0.1**.
 `sketch.yaml` selects NodeMCU 1.0 (`nodemcuv2`) with 4 MB flash / 1 MB filesystem.
 This is a build default, not a claim that the actual installed board has 4 MB.
 No filesystem is used by this firmware.

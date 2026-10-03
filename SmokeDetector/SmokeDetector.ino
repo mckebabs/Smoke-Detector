@@ -5,7 +5,9 @@
 #error "Copy Secrets.example.h to Secrets.h and configure Wi-Fi, Blynk and OTA."
 #endif
 
-#define BLYNK_TIMEOUT_MS 300
+// Blynk 1.3.5 requires a protocol timeout of at least 1000 ms.
+// DNS/TCP/socket operations retain their separate 300 ms transport timeout.
+#define BLYNK_TIMEOUT_MS 1000
 #define BLYNK_HEARTBEAT 60
 #define BLYNK_NO_DEFAULT_BANNER
 #include "CloudTransport.h"

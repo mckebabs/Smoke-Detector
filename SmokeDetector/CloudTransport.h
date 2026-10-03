@@ -35,6 +35,7 @@ class CloudClient : public BlynkProtocol<CloudTransport> {
   }
 };
 
+// Blynk's current CA bundle; hostname and certificate validity are verified.
 static const char kCloudRootCa[] PROGMEM =
-#include <certs/letsencrypt_pem.h>
+#include <certs/certs_pem.h>
 ;
