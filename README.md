@@ -126,7 +126,8 @@ after both a graceful disconnect and loss of power/internet. See
 ### Test and silence
 
 **Test:** while online, idle, and not alarming, press Test once. The detector
-button is held LOW for two seconds. Buzzer detection within ten seconds reports
+button is held LOW for up to five seconds (firmware 2.0.5), releasing immediately
+when a buzzer response is detected. Buzzer detection within ten seconds of test start reports
 **Buzzer response detected**; otherwise **No buzzer response detected** and a
 `test_failed` event. Overlapping tests are rejected. A detected episode still active
 at 15 seconds from test start is promoted to a normal smoke alarm notification.
@@ -322,7 +323,8 @@ Installation acceptance gates (do not claim success until physically checked):
 - [ ] A0 voltage and idle/buzzer levels verified; thresholds discriminate real
   beep gaps and noise. Minute diagnostics show acceptable sample gaps under TLS.
 - [ ] GPIO5 stays released during boot, reconnect, rejected commands and updates;
-  two-second test and one-second silence operate the real button correctly.
+  test hold (up to five seconds, released on buzzer response) and one-second
+  silence operate the real button correctly.
 - [ ] Normal boot with the existing GPIO15 LED wiring; PIR warm-up and rising-edge
   counts behave correctly.
 - [ ] Successful test, failed-response case, persistent test alarm escalation and

@@ -138,6 +138,31 @@
   alarm-driven hotspot cancellation, interrupted-update recovery and the real
   detector installation checks remain unverified on this bare bench board.
 
+## Real detector test-button timing
+
+- The user connected the actual detector and observed LED activity without an
+  audible test response, followed by Blynk **No buzzer response detected**.
+  The original sketch at `ab57c4b` and firmware 2.0.4 both held the button for
+  **2,000 ms**. A manual detector-button test sounded after approximately
+  **three seconds**, with about two beeps after the user released the button.
+- Firmware **2.0.5** holds the test button for **at most five seconds** and
+  releases it immediately on the first detected buzzer response. The ten-second
+  response deadline and fifteen-second escalation remain measured from test
+  start. The one-second silence press is unchanged. This targets the timing
+  mismatch; a successful real remote test is still required before claiming
+  hardware validation.
+- Host checks passed **10 scenario groups / 321 assertions**, including a
+  three-second buzzer response followed by two beeps, immediate release,
+  five-second release without a response, response timeout, alarm escalation
+  and rollover. The target compile passed with warnings enabled; static RAM
+  **33,324 / 80,192**, instruction RAM **62,139 / 65,536**, flash code
+  **415,416 / 1,048,576**.
+- The **454,352-byte** binary was installed through authenticated direct OTA in
+  **12.2 seconds**. Mac Wi-Fi was restored, and Blynk independently confirmed a
+  fresh connection, no alarm, **Not tested since restart** and **Ready for updates**.
+  The agent did not send a test or silence command; the user must verify the
+  audible response and app result on the real detector.
+
 The earlier records below describe the Windows implementation validation.
 
 Verified locally with Arduino CLI 1.3.1, ESP8266 core 3.1.2, Blynk 1.3.5 and

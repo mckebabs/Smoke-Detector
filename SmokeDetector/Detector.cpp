@@ -93,6 +93,7 @@ void Detector::sampleAlarm(uint16_t value, uint32_t now) {
     }
     if (testSession_ && testState_ == TestState::Waiting) {
       testState_ = TestState::Detected;
+      buttonPressed_ = false; // Release once the buzzer responds, like a manual test.
       ++testSuccessSequence_;
       change();
     }

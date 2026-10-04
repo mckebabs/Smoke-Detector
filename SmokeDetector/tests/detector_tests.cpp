@@ -35,28 +35,42 @@ static void tests_and_escalation() {
   Detector d = online();
   CHECK(d.requestTest(0)); CHECK(d.buttonPressed()); CHECK(!d.canOta());
   CHECK(!d.requestTest(1)); CHECK(!d.prepareSilence(1));
-  d.tick(1999); CHECK(d.buttonPressed());
-  d.tick(2000); CHECK(!d.buttonPressed());
-  d.sampleAlarm(600, 2500); CHECK(d.alarmActive());
+  d.tick(3999); CHECK(d.buttonPressed());
+  d.sampleAlarm(600, 4000); CHECK(d.alarmActive());
   CHECK(d.testState() == TestState::Detected); CHECK(d.events.size() == 0);
+  CHECK(!d.buttonPressed()); // Release immediately on the first buzzer response.
+  d.sampleAlarm(0, 4001);
+  d.tick(4999); CHECK(!d.buttonPressed());
+  d.tick(5000); CHECK(!d.buttonPressed());
   d.recordTestEpoch(1800000000); CHECK(d.lastTestEpoch() == 1800000000);
-  d.sampleAlarm(0, 3000); d.sampleAlarm(0, 13000);
+  d.sampleAlarm(0, 14001);
   CHECK(!d.testRunning()); CHECK(!d.alarmActive()); CHECK(d.events.size() == 0);
-  CHECK(d.requestTest(14000)); d.sampleAlarm(800, 15000);
-  d.tick(28999); CHECK(d.events.size() == 0);
-  d.tick(29000); CHECK(!d.testRunning()); CHECK(d.alarmActive());
+  CHECK(d.requestTest(17000)); d.sampleAlarm(800, 18000);
+  d.tick(31999); CHECK(d.events.size() == 0);
+  d.tick(32000); CHECK(!d.testRunning()); CHECK(d.alarmActive());
   CHECK(d.events.size() == 1); CHECK(d.events.front()->kind == EventKind::AlarmStart);
-  CHECK(!d.requestTest(29001));
-  d.sampleAlarm(0, 30000); d.sampleAlarm(0, 40000);
+  CHECK(!d.requestTest(32001));
+  d.sampleAlarm(0, 33000); d.sampleAlarm(0, 43000);
   CHECK(d.events.size() == 2);
 
   Detector f = online(); CHECK(f.requestTest(0));
+  f.tick(4999); CHECK(f.buttonPressed());
+  f.tick(5000); CHECK(!f.buttonPressed()); CHECK(f.testState() == TestState::Waiting);
   f.tick(9999); CHECK(f.testState() == TestState::Waiting);
   f.tick(10000); CHECK(f.testState() == TestState::Failed); CHECK(!f.testRunning());
   CHECK(!f.buttonPressed()); CHECK(f.events.front()->kind == EventKind::TestFailed);
   f.sampleAlarm(600, 10100); CHECK(f.events.size() == 2); // late response is a real alarm
 
   Detector offline; offline.begin(0); CHECK(!offline.requestTest(0));
+
+  Detector hardware = online(); CHECK(hardware.requestTest(0));
+  hardware.tick(2999); CHECK(hardware.buttonPressed());
+  hardware.sampleAlarm(600, 3000); CHECK(!hardware.buttonPressed());
+  CHECK(hardware.testState() == TestState::Detected); CHECK(hardware.events.size() == 0);
+  hardware.sampleAlarm(0, 3100); hardware.sampleAlarm(600, 3400); // second beep
+  hardware.sampleAlarm(0, 3500); hardware.sampleAlarm(0, 13500);
+  CHECK(!hardware.alarmActive()); CHECK(!hardware.testRunning());
+  CHECK(hardware.events.size() == 0); CHECK(hardware.testSuccessSequence() == 1);
 }
 
 static void silence_confirmation_and_recurrence() {
@@ -144,8 +158,8 @@ static void motion_buckets_and_outages() {
 static void rollover_and_backoff() {
   const uint32_t start = UINT32_MAX - 500;
   Detector d = online(start); CHECK(d.requestTest(start));
-  d.tick(start + 1999U); CHECK(d.buttonPressed());
-  d.tick(start + 2000U); CHECK(!d.buttonPressed()); CHECK(d.uptimeMs() == 2000);
+  d.tick(start + 4999U); CHECK(d.buttonPressed());
+  d.tick(start + 5000U); CHECK(!d.buttonPressed()); CHECK(d.uptimeMs() == 5000);
   d.tick(start + 10000U); CHECK(d.testState() == TestState::Failed);
   d.sampleAlarm(700, start + 10100U); d.sampleAlarm(0, start + 10200U);
   d.sampleAlarm(0, start + 20200U); CHECK(!d.alarmActive()); CHECK(d.uptimeMs() == 20200);
