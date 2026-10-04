@@ -16,11 +16,15 @@
 #include <Schedule.h>
 #include <time.h>
 #include "Detector.h"
+#include "UpdateMode.h"
 
 static_assert(sizeof(SMOKE_OTA_PASSWORD) >= 13, "Use an OTA password of at least 12 characters");
+static_assert(sizeof(SMOKE_OTA_PASSWORD) <= 64, "Update hotspot password must be at most 63 characters");
 static_assert(sizeof(BLYNK_AUTH_TOKEN) > 1, "Blynk token must not be empty");
 
 smoke::Detector detector;
+smoke::UpdateMode updateMode;
+const char* updateStatus = "Ready for updates";
 BoundedTlsClient cloudSocket;
 CloudTransport cloudTransport(cloudSocket);
 CloudClient Blynk(cloudTransport);
@@ -36,6 +40,8 @@ bool activityPulse = false;
 uint32_t diagnosticAt = 0, writesSent = 0, eventsSent = 0;
 uint32_t maximumSampleGap = 0, testSequenceSeen = 0;
 bool cloudWasConnected = false;
+bool wifiWasConnected = false;
+IPAddress reportedIp;
 uint64_t outageAt = 0, lastOutageSeconds = 0;
 uint32_t pending = 0, publishAt = 0;
 int lastAlarm = -1, lastTest = -1, lastSilence = -1;
@@ -45,7 +51,8 @@ char restartReason[128]{};
 
 enum PublishBit : uint8_t {
   AlarmBit, TestBit, TestEpochBit, SilenceBit, RssiBit, UptimeBit, HeapBit,
-  MotionTimeBit, VersionBit, ResetBit, MotionBucketBit, SummaryBit
+  MotionTimeBit, VersionBit, ResetBit, MotionBucketBit, SummaryBit,
+  UpdateStatusBit, UpdateCommandBit
 };
 constexpr uint32_t kHealthMask = (1UL << RssiBit) | (1UL << UptimeBit) |
     (1UL << HeapBit) | (1UL << MotionTimeBit);
@@ -62,7 +69,9 @@ void updateOutputs(uint32_t now) {
   digitalWrite(smoke::kMotionLedPin, (rawPir || detector.alarmActive()) ? HIGH : LOW);
   const bool pulse = activityPulse && !smoke::elapsed(now, activityAt, 50);
   const bool offlineBlink = !detector.connected() && now % 2000 < 50;
-  digitalWrite(smoke::kActivityLedPin, (detector.alarmActive() || pulse || offlineBlink) ? HIGH : LOW);
+  const bool updateBlink = updateMode.active() && now % 400 < 200;
+  digitalWrite(smoke::kActivityLedPin, (detector.alarmActive() || pulse ||
+      (updateMode.active() ? updateBlink : offlineBlink)) ? HIGH : LOW);
 }
 
 // Runs in CONT context, including during network yields. No networking or logs.
@@ -100,6 +109,7 @@ void observeConnection(bool connected) {
   if (connected) {
     lastOutageSeconds = (detector.uptimeMs() - outageAt) / 1000;
     pending = kSnapshotMask;
+    pending |= (1UL << UpdateStatusBit) | (1UL << UpdateCommandBit);
     // Retain the last successful timestamp in Blynk across firmware restarts.
     if (!detector.lastTestEpoch()) pending &= ~(1UL << TestEpochBit);
     if (lastOutageSeconds || detector.offlineMotion() || detector.events.dropped()) pending |= 1UL << SummaryBit;
@@ -118,7 +128,7 @@ BLYNK_DISCONNECTED() { observeConnection(false); }
 
 BLYNK_WRITE(V0) {
   serviceInputs();
-  if (param.asInt() == 1) {
+  if (param.asInt() == 1 && !updateMode.busy()) {
     const bool accepted = detector.requestTest(millis());
     Serial.println(accepted ? F("Test accepted.") : F("Test rejected: busy or alarming."));
     updateOutputs(millis());
@@ -126,18 +136,74 @@ BLYNK_WRITE(V0) {
 }
 BLYNK_WRITE(V11) {
   serviceInputs();
-  if (param.asInt() == 1) {
+  if (param.asInt() == 1 && !updateMode.busy()) {
     const bool accepted = detector.prepareSilence(millis());
     Serial.println(accepted ? F("Silence confirmation opened.") : F("Silence preparation rejected."));
   }
 }
 BLYNK_WRITE(V12) {
   serviceInputs();
-  if (param.asInt() == 1) {
+  if (param.asInt() == 1 && !updateMode.busy()) {
     const bool accepted = detector.confirmSilence(millis());
     Serial.println(accepted ? F("Silence requested.") : F("Silence confirmation rejected."));
     updateOutputs(millis());
   }
+}
+
+void requestUpdateMode() {
+  serviceInputs();
+  if (updateMode.busy()) return;
+  const bool accepted = updateMode.request(millis(),
+      otaPermitted && recurrentSensors && detector.canOta());
+  updateStatus = accepted ? "Updates open for 5 min" :
+      "Updates unavailable";
+  if (Blynk.connected()) pending |= (1UL << UpdateStatusBit) | (1UL << UpdateCommandBit);
+  Serial.println(updateStatus);
+}
+
+BLYNK_WRITE(V15) {
+  if (param.asInt() == 1) requestUpdateMode();
+}
+
+void stopUpdateMode(const char* status) {
+  ArduinoOTA.end(); otaListening = false;
+  WiFi.softAPdisconnect(true);
+  updateMode.stop();
+  WiFi.mode(WIFI_STA);
+  wifiRetry.reset(); cloudRetry.reset();
+  updateStatus = status;
+  Serial.println(status);
+}
+
+void serviceUpdateMode() {
+  const uint32_t now = millis();
+  if (updateMode.sampleButton(digitalRead(smoke::kUpdateButtonPin) == LOW, now)) requestUpdateMode();
+  if (otaUpdating) return; // Let an accepted transfer finish across the deadline.
+  if (updateMode.active()) {
+    if (!detector.canOta()) stopUpdateMode("Updates cancelled");
+    else if (updateMode.expired(now)) stopUpdateMode("Update window expired");
+    return;
+  }
+  if (!updateMode.pending()) return;
+  if (!detector.canOta()) {
+    updateMode.stop();
+    updateStatus = "Updates cancelled";
+    if (Blynk.connected()) pending |= 1UL << UpdateStatusBit;
+    return;
+  }
+  if (!updateMode.ready(now)) return;
+  // Leave the Blynk callback before disconnecting; publish acknowledgement first.
+  if (Blynk.connected() && (pending & ((1UL << UpdateStatusBit) | (1UL << UpdateCommandBit)))) return;
+  ArduinoOTA.end(); otaListening = false;
+  Blynk.disconnect(); observeConnection(false);
+  wifiWasConnected = false;
+  WiFi.mode(WIFI_AP); // AP-only avoids home-network channel changes during OTA.
+  const IPAddress address(192, 168, 4, 1);
+  const bool ready = WiFi.softAPConfig(address, address, IPAddress(255, 255, 255, 0)) &&
+      WiFi.softAP(smoke::kUpdateSsid, SMOKE_OTA_PASSWORD, 1, false, 1);
+  if (!ready) { stopUpdateMode("Update hotspot failed"); return; }
+  updateMode.started(millis());
+  Serial.println(F("Update hotspot ready: smoke-detector-direct, 192.168.4.1; 5-minute window."));
 }
 
 void configureOta() {
@@ -166,11 +232,14 @@ void configureOta() {
 void serviceOta() {
   // Remove the listener during alarms/tests, discarding pending uploads too.
   // onStart alone is too late: ArduinoOTA 3.1.2 calls it after Update.begin().
-  const bool allowed = otaPermitted && WiFi.status() == WL_CONNECTED && detector.canOta();
+  const bool allowed = otaPermitted && (WiFi.status() == WL_CONNECTED || updateMode.active()) && detector.canOta();
   if (!allowed && otaListening) {
     ArduinoOTA.end(); otaListening = false;
+    Serial.println(F("OTA listener stopped: Wi-Fi unavailable or detector busy."));
   } else if (allowed && !otaListening) {
     ArduinoOTA.begin(); otaListening = true;
+    Serial.printf("OTA listener requested at %s.local (%s), UDP 8266.\n",
+        smoke::kHostname, (updateMode.active() ? WiFi.softAPIP() : WiFi.localIP()).toString().c_str());
   }
   if (allowed && otaListening) {
     // Freeze admission conditions across handle(): even its setup/MDNS yields
@@ -182,14 +251,25 @@ void serviceOta() {
 }
 
 void serviceNetwork() {
+  if (updateMode.active()) return;
   const uint32_t now = millis();
   if (WiFi.status() != WL_CONNECTED) {
+    if (wifiWasConnected) Serial.println(F("Wi-Fi disconnected."));
+    wifiWasConnected = false;
     if (cloudWasConnected) observeConnection(false);
     if (wifiRetry.ready(now)) {
       wifiRetry.attempted(now);
       WiFi.begin(SMOKE_WIFI_SSID, SMOKE_WIFI_PASSWORD);
     }
     return;
+  }
+  const IPAddress address = WiFi.localIP();
+  if (!wifiWasConnected || address != reportedIp) {
+    wifiWasConnected = true;
+    reportedIp = address;
+    Serial.printf("Wi-Fi connected; IP %s; RSSI %ld dBm.\n",
+        address.toString().c_str(), static_cast<long>(WiFi.RSSI()));
+    if (Blynk.connected()) pending |= 1UL << VersionBit;
   }
   wifiRetry.reset();
   if (Blynk.connected()) {
@@ -257,8 +337,16 @@ void publishOne(uint8_t bit) {
     }
     case HeapBit: Blynk.virtualWrite(V5, ESP.getFreeHeap()); break;
     case MotionTimeBit: Blynk.virtualWrite(V6, detector.lastMotionEpoch()); break;
-    case VersionBit: Blynk.virtualWrite(V9, smoke::kFirmwareVersion); break;
+    case VersionBit: {
+      const IPAddress address = WiFi.localIP();
+      char value[16];
+      snprintf(value, sizeof(value), "%u.%u.%u.%u",
+          unsigned(address[0]), unsigned(address[1]), unsigned(address[2]), unsigned(address[3]));
+      Blynk.virtualWrite(V9, value); break;
+    }
     case ResetBit: Blynk.virtualWrite(V10, restartReason); break;
+    case UpdateStatusBit: Blynk.virtualWrite(V16, updateStatus); break;
+    case UpdateCommandBit: Blynk.virtualWrite(V15, 0); break;
     case MotionBucketBit: {
       const uint32_t value = detector.motionTotal();
       Blynk.virtualWrite(V2, value);
@@ -320,6 +408,10 @@ void serviceTelemetry() {
     pending &= ~(1UL << AlarmBit); publishOne(AlarmBit);
   } else if (detector.events.front() && eventAllowed()) {
     publishEvent();
+  } else if (pending & (1UL << UpdateStatusBit)) {
+    pending &= ~(1UL << UpdateStatusBit); publishOne(UpdateStatusBit);
+  } else if (pending & (1UL << UpdateCommandBit)) {
+    pending &= ~(1UL << UpdateCommandBit); publishOne(UpdateCommandBit);
   } else {
     for (uint8_t bit = 1; bit <= SummaryBit; ++bit) {
       if (pending & (1UL << bit)) {
@@ -336,6 +428,7 @@ void setup() {
   pinMode(smoke::kBlueLedPin, OUTPUT);
   pinMode(smoke::kMotionLedPin, OUTPUT);
   pinMode(smoke::kActivityLedPin, OUTPUT);
+  pinMode(smoke::kUpdateButtonPin, INPUT_PULLUP);
   Serial.begin(115200);
   const uint32_t now = millis();
   detector.begin(now);
@@ -360,19 +453,23 @@ void setup() {
 
 void loop() {
   serviceInputs();
+  serviceUpdateMode();
   serviceOta();
   serviceNetwork();
   serviceInputs();
+  serviceUpdateMode();
   serviceOta();
   serviceTelemetry();
   if (smoke::elapsed(millis(), diagnosticAt, 60000)) {
     diagnosticAt = millis();
-    Serial.printf("ADC last/min/max %u/%u/%u; max sample gap %lu ms; alarm %u; heap %lu; writes/events %lu/%lu; WiFi %u; clock %u; Blynk %u\n",
+    Serial.printf("ADC last/min/max %u/%u/%u; max sample gap %lu ms; alarm %u; heap %lu; writes/events %lu/%lu; WiFi %u; clock %u; Blynk %u; IP %s; OTA eligible/listening %u/%u; direct updates %u\n",
         unsigned(lastAdc), unsigned(adcMin), unsigned(adcMax),
         static_cast<unsigned long>(maximumSampleGap), unsigned(detector.alarmActive()),
         static_cast<unsigned long>(ESP.getFreeHeap()), static_cast<unsigned long>(writesSent),
         static_cast<unsigned long>(eventsSent), unsigned(WiFi.status()),
-        unsigned(utcNow() != 0), unsigned(Blynk.connected()));
+        unsigned(utcNow() != 0), unsigned(Blynk.connected()),
+        (updateMode.active() ? WiFi.softAPIP() : WiFi.localIP()).toString().c_str(),
+        unsigned(otaPermitted), unsigned(otaListening), unsigned(updateMode.active()));
     adcMin = 1023; adcMax = 0; maximumSampleGap = 0;
   }
 }

@@ -70,19 +70,28 @@ datastreams have no numeric range.
 | V6 | Last movement UTC | Double 0–4294967295 | Timestamp value; hourly and on connection |
 | V7 | Test result | String | Status label; on change and connection |
 | V8 | Last successful test UTC | Double 0–4294967295 | Timestamp value; on success and connection if known |
-| V9 | Firmware version | String | Value; on connection |
+| V9 | Wi-Fi IP address | String | Value; on connection and IP change |
 | V10 | Restart reason | String | Value; on connection |
 | V11 | Prepare silence | Integer 0–1 | Momentary PUSH button |
 | V12 | Confirm silence | Integer 0–1 | Separate momentary PUSH button |
 | V13 | Silence result | String | Status label; on change and connection |
 | V14 | Outage summary | String | Diagnostic label/history; after outages or overflow |
+| V15 | Enable updates | Integer 0–1 | Momentary PUSH button; never sync commands |
+| V16 | Update mode status | String | Value/status label; on connection and requests |
 
 V14 is an additional diagnostic stream for outage length, offline motion counts,
 and dropped queue records, so these reports do not replace V7/V13 control results.
-Set all three command buttons to PUSH, not SWITCH; react only to value 1. Disable
-**sync latest value on device connection** for V0, V11 and V12. Do not add app
+Set all four command buttons to PUSH, not SWITCH; react only to value 1. Disable
+**sync latest value on device connection** for V0, V11, V12 and V15. Do not add app
 automations that repeat these commands. Firmware never requests command syncing.
 Where available, make telemetry datastreams read-only for dashboard users.
+
+V9 now shows, for example, `192.168.1.123`. Reuse the existing
+String datastream and value widget; rename their label to **Wi-Fi IP address** in
+the web and iOS dashboards. The IP is the device's local Wi-Fi address for
+OTA uploads. Offline, the widget retains the last reported address, which
+may be stale until the next connection. Wi-Fi signal strength remains on V3.
+The firmware version remains in the serial startup log.
 
 Enable saved history for V2 and use a column/bar chart of 15-minute counts with
 raw values or sums over non-overlapping intervals. Do not interpret the counts
@@ -168,7 +177,7 @@ the reason is recorded on serial, while current alarm/control status stays visib
 
 Pinned dependencies: **Arduino CLI 1.3.1**, **ESP8266 core 3.1.2**, **Blynk 1.3.5**.
 TLS uses Blynk's current `certs/certs_pem.h` CA bundle with hostname and certificate
-validity verification retained. Firmware version: **2.0.2**.
+validity verification retained. Firmware version: **2.0.3**.
 `sketch.yaml` selects NodeMCU 1.0 (`nodemcuv2`) with 4 MB flash / 1 MB filesystem.
 This is a build default, not a claim that the actual installed board has 4 MB.
 No filesystem is used by this firmware.
@@ -202,7 +211,8 @@ No filesystem is used by this firmware.
 6. Reset the board after the first serial upload. At 115200 baud, check reported
    actual/configured flash, sketch size, free update space and **OTA eligible**.
    A size mismatch or insufficient free space disables OTA without stopping
-   monitoring. Obtain the IP from your router's client list (`smoke-detector`).
+   monitoring. The serial log prints the Wi-Fi IP on connection and address
+   changes, and the OTA listener's start/stop status. V9 also reports the IP.
 7. Complete the installation checklist below before closing the enclosure.
 
 Arduino IDE is also supported: install the same ESP8266 and Blynk versions,
@@ -211,7 +221,42 @@ compile/upload. The CLI profile does not automatically configure the IDE.
 
 ## Local OTA and recovery
 
-OTA works from your home network and does not require Blynk connectivity or SNTP.
+OTA works on networks that permit communication between the Mac and board and
+does not require Blynk connectivity or SNTP. Firmware **2.0.4** also includes a
+direct update mode for networks where that communication fails:
+
+1. While the detector is idle, press **Enable updates** (V15) in Blynk. Alternatively,
+   hold the NodeMCU **FLASH** button for three seconds after normal startup, then
+   release it. Holding FLASH during reset enters the chip's serial bootloader;
+   press it only after the firmware has started. It must be released once after
+   startup before physical activation is armed.
+2. Connect the Mac to **smoke-detector-direct** using the existing
+   `SMOKE_OTA_PASSWORD` from your private `Secrets.h`. The hotspot admits one client
+   and the board is at **192.168.4.1**.
+3. Open the normal sketch with the same credentials and OTA support, select
+   **NodeMCU 1.0**, **4MB (FS:1MB OTA:~1019KB)** and the **smoke-detector at
+   192.168.4.1** network port in Arduino IDE, then upload with the OTA password.
+4. Reconnect the Mac to its usual Wi-Fi. After a successful update the board
+   reboots into normal mode; update mode is never persisted across restarts.
+
+The hotspot closes after **five minutes** and the board reconnects to its usual
+Wi-Fi. An already accepted upload may finish beyond the deadline. Blynk is
+temporarily offline in this AP-only mode; local sensor processing continues until
+the actual firmware transfer. An alarm or detector operation before transfer
+cancels update mode and restores normal networking. The Blynk V16 acknowledgement
+may remain visible while offline; reconnection refreshes it. V15 resets to zero,
+and repeated presses do not extend the window. Keep USB accessible for recovery.
+The temporary `/private/tmp` diagnostic helper is not needed for routine updates.
+The activity LED on GPIO13 blinks rapidly while the hotspot is active
+(if that external LED is connected).
+
+The mobile and web dashboards use the same datastreams but have separate layouts.
+In **Blynk.App → Developer Mode → Smoke Detector**, add a **Button** on **Enable
+updates (V15)**, set its mode to **PUSH**, OFF/ON values to **0/1**, and label it
+**Enable updates**. Add a **Value Display** on **Update mode status (V16)**.
+The web dashboard already has these controls. Command synchronization on reconnect
+must remain disabled; firmware never requests command synchronization.
+
 The listener is closed while an alarm, test, or button operation is active;
 pending transfers are discarded too. GPIO5 is released before an accepted update.
 Sensor servicing pauses during upload/reboot and briefly during OTA admission.
@@ -232,7 +277,19 @@ Increment `kFirmwareVersion` in `Settings.h`. Use either:
   tools can expose their password argument. Firewall rules must permit the
   device's OTA UDP port 8266 and the connection back to the upload computer.
 
-Check the device reconnects and V9 shows the new version. Perform another OTA
+On macOS, browse for about 20 seconds while the board is idle:
+
+```bash
+dns-sd -B _arduino._tcp local.
+# Press Ctrl-C after observing the results.
+```
+
+If discovery fails, use the IP printed on serial or V9 with `espota.py`.
+Check Arduino IDE's Local Network access in macOS System Settings and ensure
+both devices are on a network that permits communication between clients.
+
+Check the device reconnects and V9 reports its IP; check the new firmware version
+in the serial startup log. Perform another OTA
 upload to prove the new firmware retained update support. Authentication/update
 failures resume monitoring. An interrupted upload should leave the old image
 usable if the final flash-copy phase has not begun; a power failure during copying

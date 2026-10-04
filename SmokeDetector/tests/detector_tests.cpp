@@ -1,4 +1,5 @@
 #include "Detector.h"
+#include "UpdateMode.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -199,10 +200,40 @@ static void event_limits_and_retry_order() {
   CHECK(q.front()->atMs == 10); q.pop(); CHECK(q.front()->atMs == 20);
 }
 
+static void update_window_and_physical_activation() {
+  UpdateMode mode;
+  CHECK(!mode.request(0, false)); CHECK(!mode.busy());
+  CHECK(mode.request(0, true)); CHECK(!mode.request(1, true));
+  CHECK(!mode.ready(999)); CHECK(mode.ready(1000));
+  mode.started(1000); CHECK(mode.active()); CHECK(!mode.pending());
+  CHECK(!mode.request(2000, true));
+  CHECK(!mode.expired(300999)); CHECK(mode.expired(301000));
+  mode.stop(); CHECK(!mode.busy()); CHECK(!mode.expired(400000));
+  CHECK(mode.request(UINT32_MAX - 500, true)); CHECK(mode.ready(499));
+  mode.started(UINT32_MAX - 1000);
+  CHECK(!mode.expired(298998)); CHECK(mode.expired(298999));
+  mode.stop();
+  CHECK(!mode.sampleButton(true, 0)); CHECK(!mode.sampleButton(true, 10000));
+  CHECK(!mode.sampleButton(false, 10001));
+  CHECK(!mode.sampleButton(true, 10002)); CHECK(!mode.sampleButton(true, 13001));
+  CHECK(mode.sampleButton(true, 13002)); CHECK(!mode.sampleButton(true, 50000));
+  CHECK(!mode.sampleButton(false, 50001));
+  CHECK(!mode.sampleButton(true, UINT32_MAX - 1000));
+  CHECK(mode.sampleButton(true, 1999));
+  Detector d = online(); d.sampleAlarm(600, 0);
+  CHECK(!mode.request(0, d.canOta()));
+  d.sampleAlarm(0, 1); d.sampleAlarm(0, 10001);
+  CHECK(d.requestTest(10002)); CHECK(!mode.request(10003, d.canOta()));
+  d.tick(20002); CHECK(mode.request(20003, d.canOta()));
+  d.sampleAlarm(600, 20004); CHECK(!d.canOta());
+  mode.stop(); CHECK(!mode.ready(21003));
+}
+
 int main() {
   alarm_hysteresis_and_beeps(); tests_and_escalation();
   silence_confirmation_and_recurrence(); offline_local_monitoring_and_queue();
   motion_buckets_and_outages(); rollover_and_backoff(); ota_admission(); routine_budget();
   event_limits_and_retry_order();
-  printf("PASS: 9 scenario groups, %d assertions.\n", assertions);
+  update_window_and_physical_activation();
+  printf("PASS: 10 scenario groups, %d assertions.\n", assertions);
 }

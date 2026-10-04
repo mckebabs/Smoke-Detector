@@ -6,3 +6,5 @@ __pycache__/
 *.bin
 *.elf
 *.map
+.DS_Store
+SmokeDetector/build/
