@@ -180,10 +180,14 @@
   The NodeMCU target compile passed: static RAM **34,188 / 80,192**, instruction
   RAM **62,139 / 65,536**, flash code **425,736 / 1,048,576**;
   binary **465,488 bytes**.
-- **Installation and device-side verification are pending**: the user is
-  disconnecting the device until needed again. No OTA activation, firmware
-  upload, test or silence command was sent for this change. Firmware 2.0.5 can
-  still send numeric values until 2.0.6 is installed on reconnection.
+- After the user reconnected the detector, the **465,488-byte** 2.0.6 image
+  was installed through authenticated direct OTA in **12.1 seconds**, and the
+  Mac's usual Wi-Fi was restored. Image SHA256:
+  `60c6e0da046aee07fde8f6dbb62edb61f3845ce60a817f666226e2e403701b9e`.
+  Blynk confirmed a fresh online connection at **2026-10-04 21:22:22 UTC**,
+  no active alarm and **Ready for updates**. V6 now publishes the expected
+  startup string **Not recorded since restart** rather than numeric zero;
+  V8 retained **2026-10-05 00:07**. No test or silence command was sent.
 
 The earlier records below describe the Windows implementation validation.
 
