@@ -56,8 +56,8 @@ reused. Create a template named **Smoke Detector**, hardware **ESP8266**, connec
 token in your local `Secrets.h`.
 
 Create these virtual-pin datastreams. Use zero as the default for numeric values,
-unless noted. Epoch values are UTC Unix seconds, not formatted local time. String
-datastreams have no numeric range.
+unless noted. Date/time values are readable strings in Europe/Riga time, with
+automatic daylight-saving changes. String datastreams have no numeric range.
 
 | Pin | Name | Type / range | Dashboard / cadence |
 | --- | --- | --- | --- |
@@ -67,9 +67,9 @@ datastreams have no numeric range.
 | V3 | Wi-Fi RSSI | Integer -127–0 | Value in dBm; hourly and on connection |
 | V4 | Uptime seconds | Double 0–1000000000000 | Value; hourly and on connection |
 | V5 | Free heap | Integer 0–100000 | Bytes; hourly and on connection |
-| V6 | Last movement UTC | Double 0–4294967295 | Timestamp value; hourly and on connection |
+| V6 | Last movement Riga | String | Date/time value; hourly and on connection |
 | V7 | Test result | String | Status label; on change and connection |
-| V8 | Last successful test UTC | Double 0–4294967295 | Timestamp value; on success and connection if known |
+| V8 | Last successful test Riga | String | Date/time value; on success and connection if known |
 | V9 | Wi-Fi IP address | String | Value; on connection and IP change |
 | V10 | Restart reason | String | Value; on connection |
 | V11 | Prepare silence | Integer 0–1 | Momentary PUSH button |
@@ -98,8 +98,14 @@ raw values or sums over non-overlapping intervals. Do not interpret the counts
 as number of people. Build the web and mobile dashboards separately: alarm and
 controls at the top, V7/V8/V13 alongside the controls, then the motion chart and
 health values. The app's available widgets and history retention depend on your
-account. If a timestamp-formatting widget is unavailable, label the values as
-Unix UTC seconds. Set dashboard/account timezone to Europe/Riga when supported.
+account. Use Value Display widgets for V6/V8, labelled **Last movement (Riga)**
+and **Last successful test (Riga)**. Firmware 2.0.6 sends values such as
+`2026-10-05 00:07`; change both existing datastreams from Double to String when
+installing this version. They no longer require app-side timestamp formatting.
+Keep the mobile widgets bound to their existing V6/V8 datastreams; rename their
+titles to match and give each enough width for the full date/time. Older firmware
+will still send raw numbers until 2.0.6 is installed. Offline values remain the
+last report, so check device status before treating them as current.
 
 Create these custom events in the template:
 
@@ -154,11 +160,11 @@ the reason is recorded on serial, while current alarm/control status stays visib
 - Offline motion is summarized in V14, never inserted into a current chart bucket.
   Summary counts cover accumulation since the preceding successfully submitted
   summary; they are not lifetime totals.
-  Last movement is RAM-only and V6 returns to zero after restart. Zero also means
-  the movement occurred before clock synchronization.
+  Last movement is RAM-only and V6 shows **Not recorded since restart** until
+  movement is recorded with a synchronized clock.
 - Test result resets to **Not tested since restart**. V8 is not overwritten with
-  zero after restart, retaining the previous successful timestamp in Blynk. A new
-  successful test supplies a new timestamp.
+  an empty value after restart, retaining the previous successful date/time in
+  Blynk. A new successful test supplies a new date/time.
 - Sixteen alarm/test event records fit in RAM. Alarm starts evict lower-priority
   records when full; if all entries are starts, the oldest is replaced. Overflow
   is summarized in V14. Delayed events include their age, whether they occurred

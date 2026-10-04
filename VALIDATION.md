@@ -149,8 +149,9 @@
   releases it immediately on the first detected buzzer response. The ten-second
   response deadline and fifteen-second escalation remain measured from test
   start. The one-second silence press is unchanged. This targets the timing
-  mismatch; a successful real remote test is still required before claiming
-  hardware validation.
+  mismatch. The user subsequently confirmed the real app-triggered audible
+  test worked; Blynk reported **Buzzer response detected** and recorded a
+  successful test at **2026-10-05 00:07 Europe/Riga**.
 - Host checks passed **10 scenario groups / 321 assertions**, including a
   three-second buzzer response followed by two beeps, immediate release,
   five-second release without a response, response timeout, alarm escalation
@@ -160,8 +161,29 @@
 - The **454,352-byte** binary was installed through authenticated direct OTA in
   **12.2 seconds**. Mac Wi-Fi was restored, and Blynk independently confirmed a
   fresh connection, no alarm, **Not tested since restart** and **Ready for updates**.
-  The agent did not send a test or silence command; the user must verify the
-  audible response and app result on the real detector.
+  The agent did not send a test or silence command. Real detector hush behavior
+  remains unverified.
+
+## Readable date/time fields
+
+- Firmware **2.0.6** publishes V6 and V8 as `YYYY-MM-DD HH:MM` strings in
+  **Europe/Riga** time, automatically following winter/summer time. Internal
+  timestamps remain UTC. V6 reports **Not recorded since restart** when no
+  clock-qualified movement is known; V8 retains the last successful value in
+  Blynk across restart.
+- Both existing Blynk datastreams were changed from Double to String without
+  replacing their IDs/pins. Their existing epochs were converted and preserved:
+  V6 **2026-10-05 00:12**, V8 **2026-10-05 00:07**. Web widget titles identify
+  Riga time. Mobile widgets should remain bound to V6/V8 and use Value Display.
+- Host checks passed **11 scenario groups / 330 assertions**, including the
+  recorded successful test, winter/summer offsets and both DST transitions.
+  The NodeMCU target compile passed: static RAM **34,188 / 80,192**, instruction
+  RAM **62,139 / 65,536**, flash code **425,736 / 1,048,576**;
+  binary **465,488 bytes**.
+- **Installation and device-side verification are pending**: the user is
+  disconnecting the device until needed again. No OTA activation, firmware
+  upload, test or silence command was sent for this change. Firmware 2.0.5 can
+  still send numeric values until 2.0.6 is installed on reconnection.
 
 The earlier records below describe the Windows implementation validation.
 

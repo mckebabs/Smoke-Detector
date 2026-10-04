@@ -17,6 +17,7 @@
 #include <time.h>
 #include "Detector.h"
 #include "UpdateMode.h"
+#include "TimeDisplay.h"
 
 static_assert(sizeof(SMOKE_OTA_PASSWORD) >= 13, "Use an OTA password of at least 12 characters");
 static_assert(sizeof(SMOKE_OTA_PASSWORD) <= 64, "Update hotspot password must be at most 63 characters");
@@ -323,7 +324,9 @@ void publishOne(uint8_t bit) {
     }
     case TestEpochBit: {
       const uint32_t value = detector.lastTestEpoch();
-      Blynk.virtualWrite(V8, value); lastTestEpoch = value; break;
+      char display[32];
+      smoke::formatLocalTime(value, display, sizeof(display));
+      Blynk.virtualWrite(V8, display); lastTestEpoch = value; break;
     }
     case SilenceBit: {
       const auto state = detector.silenceState();
@@ -336,7 +339,11 @@ void publishOne(uint8_t bit) {
       Blynk.virtualWrite(V4, value); break;
     }
     case HeapBit: Blynk.virtualWrite(V5, ESP.getFreeHeap()); break;
-    case MotionTimeBit: Blynk.virtualWrite(V6, detector.lastMotionEpoch()); break;
+    case MotionTimeBit: {
+      char display[32];
+      smoke::formatLocalTime(detector.lastMotionEpoch(), display, sizeof(display));
+      Blynk.virtualWrite(V6, display); break;
+    }
     case VersionBit: {
       const IPAddress address = WiFi.localIP();
       char value[16];
@@ -447,7 +454,7 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.hostname(smoke::kHostname);
   WiFi.setAutoReconnect(false);
-  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  configTime(smoke::kTimeZone, "pool.ntp.org", "time.nist.gov");
   Serial.printf("Smoke detector %s ready. OTA hostname: %s.\n", smoke::kFirmwareVersion, smoke::kHostname);
 }
 

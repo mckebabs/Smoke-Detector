@@ -7,7 +7,9 @@ constexpr uint8_t kPirPin = 12;
 constexpr uint8_t kBlueLedPin = 2;
 constexpr uint8_t kMotionLedPin = 15;
 constexpr uint8_t kActivityLedPin = 13;
-constexpr const char* kFirmwareVersion = "2.0.5";
+constexpr const char* kFirmwareVersion = "2.0.6";
+// Europe/Riga: UTC+2 in winter, UTC+3 between the EU daylight-saving changes.
+constexpr const char* kTimeZone = "EET-2EEST,M3.5.0/3,M10.5.0/4";
 constexpr const char* kHostname = "smoke-detector";
 constexpr const char* kUpdateSsid = "smoke-detector-direct";
 constexpr uint8_t kUpdateButtonPin = 0; // NodeMCU FLASH; press after startup.
